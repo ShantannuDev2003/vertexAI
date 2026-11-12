@@ -7,6 +7,7 @@ import { setUserData } from './redux/userSlice.js'
 import { me } from './features/me.js'
 import { useEffect } from 'react'
 import ProjectPage from './pages/ProjectPage.jsx'
+import Plan from './pages/Plan.jsx'
 const App = () => {
   const dispatch = useDispatch()
   useEffect(() => {
@@ -36,6 +37,7 @@ const App = () => {
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/project/:id" element={<ProjectPage />} />
+        <Route path="/plan" element={<Plan />} />
       </Routes>
     </BrowserRouter>
   )

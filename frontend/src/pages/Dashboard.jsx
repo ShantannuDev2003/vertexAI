@@ -1,69 +1,52 @@
-import React from "react";
-import { FaGoogle } from "react-icons/fa";
-import { auth, googleProvider } from "../../firebase.js";
-import { signInWithPopup } from "firebase/auth";
-import { login } from "../features/login.js";
-import { useDispatch } from "react-redux";
-import { setUserData } from "../redux/userSlice.js";
-import { useSelector } from "react-redux";
-import NavBar from "../components/NavBar.jsx";
-import { Menu, Plus } from "lucide-react";
+import { signInWithPopup } from 'firebase/auth';
+import React, { useEffect } from 'react'
+import { FcGoogle } from "react-icons/fc";
+import { auth, googleProvider } from '../../firebase';
+import { login } from '../features/login';
+import { useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { setUserData } from '../redux/userSlice';
+import NavBar from '../components/NavBar';
 import SideBar from '../components/SideBar';
-import { useState } from "react";
-import { motion } from "motion/react";
-import { setProjects} from '../redux/projectSlice';
-import { getProjects ,getStarredProjects} from '../features/project';
-import { X } from "lucide-react";
-import { useEffect } from "react";
-import { Loader2, Folder } from "lucide-react";
-import CreateProjectModal from "../components/CreateProjectModal.jsx";
-import ProjectCard from "../components/ProjectCard.jsx";
+import { Folder, Loader2, Menu, Plus, X } from 'lucide-react';
+import { getProjects, getStarredProjects } from '../features/project';
+import { setProjects } from '../redux/projectSlice';
+import ProjectCard from '../components/ProjectCard';
+import CreateProjectModal from '../components/CreateProjectModal';
 
 
-
-const Dashboard = () => {
-    const [loading, setLoading] = React.useState(false);
-    const dispatch = useDispatch();
-    const { userData } = useSelector(state => state.user)
-    const [mobileSideBarOpen, setMobileSidebarOpen] = useState(false)
+function Dashboard() {
+    const [loading, setLoading] = useState(false)
     const [activeSession, setActiveSession] = useState("projects")
     const [loadingProjects, setLoadingProjects] = useState(false)
-    const { projects, starredProjects } = useSelector(state => state.project)
     const [openModal, setOpenModal] = useState(false)
-
-
+    const [mobileSideBarOpen, setMobileSidebarOpen] = useState(false)
+    const dispatch = useDispatch()
+    const { userData } = useSelector(state => state.user)
+    const { projects, starredProjects } = useSelector(state => state.project)
     const handleLogin = async () => {
-        try {
-            setLoading(true);
+        setLoading(true)
+        const result = await signInWithPopup(auth, googleProvider)
+        const token = await result.user.getIdToken()
+        const data = await login(token)
+        dispatch(setUserData(data))
+        setLoading(false)
 
-            const result =
-                await signInWithPopup(
-                    auth,
-                    googleProvider
-                );
-
-            const token =
-                await result.user.getIdToken();
-
-            const data = await login(token);
-
-            dispatch(setUserData(data));
-
-        } catch (error) {
-            console.error("Login failed:", error);
-
-        } finally {
-            setLoading(false);
-        }
-    };
+    }
 
     const fetchAllProjects = async () => {
         setLoadingProjects(true)
         const data = await getProjects()
+
+        
+
+        console.log("PROJECT RESPONSE:", JSON.stringify(data, null, 2))
+        console.log("RESPONSE TYPE:", typeof data)
+        console.log("IS ARRAY:", Array.isArray(data))
+
         dispatch(setProjects(data))
         setLoadingProjects(false)
     }
-
 
     const fetchStarredProjects = async () => {
         setLoadingProjects(true)
@@ -81,40 +64,41 @@ const Dashboard = () => {
     }, [activeSession, userData])
 
     if (!userData) {
-        return (<div className="relative flex h-screen w-full items-center justify-center overflow-hidden bg-slate-50 px-4 transition-colors duration-300 dark:bg-[#07070c]">
-            <div className="pointer-events-none absolute -top-32 left-1/2 hidden h-[600px] w-[600px] -translate-x-1/2 rounded-full bg-white/[0.05] blur-[120px] dark:block" />
+        return (
+            <div className='relative flex h-screen w-full items-center justify-center overflow-hidden bg-slate-50 px-4 transition-colors duration-300 dark:bg-[#07070c]'>
 
-            <div className="relative w-full max-w-sm rounded-2xl border border-slate-200/70 bg-white/80 p-6 text-center shadow-xl shadow-slate-200/50 backdrop-blur-xl sm:p-8 dark:border-white/[0.08] dark:bg-white/[0.03] dark:shadow-black/40">
+                <div className='pointer-events-none absolute -top-32 left-1/2 hidden h-[600px] w-[600px] -translate-x-1/2 rounded-full bg-white/[0.05] blur-[120px] dark:block' />
 
-                <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-xl border border-slate-200 bg-white shadow-lg shadow-black/5 dark:border-transparent dark:bg-white/10">
-                    <span className="text-lg font-bold text-slate-900 dark:text-white">
-                        AI
-                    </span>
+                <div className='relative w-full max-w-sm rounded-2xl border border-slate-200/70 bg-white/80 p-6 sm:p-8 text-center shadow-xl shadow-slate-200/50 backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.03] dark:shadow-black/40'>
+
+                    <div className='mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-xl border border-slate-200 bg-white shadow-lg shadow-black/5 dark:border-transparent'>
+                        <span className='text-lg font-bold text-slate-900'>AI</span>
+                    </div>
+
+                    <h2 className='mb-2 text-xl font-bold text-slate-900 dark:text-white'>
+                        Welcome to VertexAI
+                    </h2>
+
+                    <p className='mb-6 text-[13.5px] leading-relaxed text-slate-500 dark:text-slate-400'>
+                        Sign in to access your projects and continue building.
+                    </p>
+
+                    <button
+                        onClick={handleLogin}
+                        disabled={loading}
+                        className='flex w-full items-center justify-center gap-3 rounded-lg border border-slate-200 bg-white py-2.5 text-[13.5px] font-medium text-slate-800 shadow-sm transition-colors duration-150 hover:bg-slate-50 disabled:opacity-70 dark:border-transparent dark:bg-white dark:hover:bg-slate-100'>
+                        <FcGoogle />
+                        {loading ? "Signing in..." : "Continue with Google"}
+                    </button>
+
+                    <p className='mt-5 text-[11px] text-slate-400 dark:text-slate-600'>By continuing you agree to our Terms & Privacy Policy.</p>
+
                 </div>
 
-                <h2 className="mb-2 text-xl font-bold text-slate-900 dark:text-white">
-                    Welcome to VertexAI
-                </h2>
-
-                <p className="mb-6 text-[13.5px] leading-relaxed text-slate-500 dark:text-slate-400">
-                    Sign in to access your projects and continue building.
-                </p>
-
-                <button
-                    onClick={handleLogin}
-                    disabled={loading}
-                    type="button"
-                    className="w-full rounded-lg bg-slate-900 py-2.5 text-[13.5px] font-medium text-white shadow-sm transition-opacity duration-150 hover:opacity-90 dark:bg-white dark:text-slate-900"
-                >
-                    {loading ? "Signing in..." : "Continue with Google"} <FaGoogle className="ml-2 inline-block" />
-
-                </button>
 
             </div>
-        </div>)
-
-    };
-
+        )
+    }
 
     return (
         <div className='relative flex h-screen w-full flex-col overflow-hidden bg-slate-50 transition-colors duration-300 dark:bg-[#07070c]'>
@@ -129,12 +113,27 @@ const Dashboard = () => {
                 <div className='flex min-h-0 flex-1'>
                     <div className='hidden md:block'>
                         <SideBar activeSession={activeSession} setActiveSession={setActiveSession} />
-
                     </div>
 
-                    
-
-
+                    {mobileSideBarOpen && (
+                        <div className='fixed inset-0 z-40 md:hidden'>
+                            <div onClick={() => setMobileSidebarOpen(false)} className='absolute inset-0 bg-black/40 backdrop-blur-sm' />
+                            <div className='absolute left-0 top-0 h-full w-72 max-w-[80vw] bg-slate-50 shadow-2xl dark:bg-[#0a0a10]'>
+                                <div className='flex items-center justify-between px-4 py-4 border-b border-slate-200/70 dark:border-white/[0.07]'>
+                                    <span className='text-[13.5px] font-semibold text-slate-900 dark:text-white'>
+                                        Menu
+                                    </span>
+                                    <button onClick={() => setMobileSidebarOpen(false)}
+                                        className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-white/[0.06]"
+                                        aria-label="Close menu"
+                                    >
+                                        <X size={18} />
+                                    </button>
+                                </div>
+                                <SideBar activeSession={activeSession} setActiveSession={setActiveSession} />
+                            </div>
+                        </div>
+                    )}
 
                     <div
                         className='min-h-0 flex-1 overflow-y-auto px-4
@@ -147,7 +146,7 @@ const Dashboard = () => {
                     >
 
                         <div
-
+                            onClick={() => setMobileSidebarOpen(true)}
                             className="
                 mb-4
                 flex
@@ -192,9 +191,7 @@ const Dashboard = () => {
 
                                 <p className='mt-1 text-[13.5px] text-slate-500 dark:text-slate-400'>Ready to build something amazing today?</p>
                             </div>
-                            <button
-                                onClick={() => setOpenModal(true)}
-                                className=' flex
+                            <button className=' flex
                   w-full
                   sm:w-auto
                   shrink-0
@@ -215,7 +212,7 @@ const Dashboard = () => {
                   dark:bg-white
                   dark:text-slate-900
 '
-                              
+                                onClick={() => setOpenModal(true)}
                             >
                                 <Plus size={16} />
                                 New Project
@@ -224,9 +221,10 @@ const Dashboard = () => {
 
                         <div className='mb-4 flex items-center justify-between'>
                             <h2 className='text-[16px] font-semibold text-slate-900 dark:text-white'>
-                                {activeSession === "projects" ? "Recent Projects" : "Starred Projects"}
+                                {activeSession == "starred" ? "Starred Projects" : "Recent Projects"}
                             </h2>
                         </div>
+
 
                         {loadingProjects ? (
                             <div className='flex min-h-[300px] items-center justify-center'>
@@ -267,9 +265,9 @@ const Dashboard = () => {
                   lg:grid-cols-3
                   xl:grid-cols-4
 '>
-                                {projects?.map((p, i) => (
-                                    <ProjectCard project={p} />
-                                ))}
+                                        {(Array.isArray(projects) ? projects : projects?.projects ?? []).map((p, i) => (
+                                            <ProjectCard key={p._id || i} project={p} />
+                                        ))}
                             </div>
                         )}
 
@@ -287,10 +285,6 @@ const Dashboard = () => {
     )
 
 
-
-              
-
 }
 
-
-export default Dashboard;
+export default Dashboard

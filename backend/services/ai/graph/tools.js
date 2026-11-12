@@ -148,7 +148,12 @@ The response contains the complete file content.
     const createFolderTool = tool(
         async ({ name, parentId }) => {
             console.log("ai tool-create_folder")
-            const folder = await createFolder({ projectId, userId, name, parentId })
+            const folder = await createFolder({
+                projectId,
+                userId,
+                name,
+                parentId: parentId ?? null
+            })
             requireFileServiceObject(folder, "create_folder")
 
             return JSON.stringify({
@@ -179,7 +184,7 @@ RULES:
 `,
             schema: z.object({
                 name: z.string().trim().min(1),
-                parentId: z.string().nullable()
+                parentId: z.string().optional()
             })
         }
     )

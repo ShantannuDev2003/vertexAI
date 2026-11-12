@@ -3,99 +3,119 @@ import { getAuth } from "firebase-admin/auth"
 import User from "../models/user.model.js"
 import crypto from "crypto"
 import redis from "../../../shared/redis/redis.js"
-
 export const login = async (req, res) => {
     try {
-        // console.log("========== LOGIN START ==========");
-
-        const { token } = req.body;
-        // console.log("1. Token received");
-        // console.log("2. Firebase token verified");
-
-        const decoded = await getAuth(app).verifyIdToken(token);
-        // console.log("2. Firebase token verified");
-
-        // console.log("3. Looking for user:", decoded.uid);
+        const { token } = req.body
+        const decoded = await getAuth(app).verifyIdToken(token)
 
         let user = await User.findOne({
             firebaseUid: decoded.uid
-        });
-
-        // console.log("4. User lookup result:", user);
+        })
 
         if (!user) {
-            console.log("5. User doesn't exist. Creating user...");
-
             user = await User.create({
                 firebaseUid: decoded.uid,
-                email: decoded.email,
                 name: decoded.name,
+                email: decoded.email,
                 avatar: decoded.picture
-            });
-
-            // console.log("6. User created:", user);
+            })
         }
 
-        // console.log("7. Creating session");
+        const sessionId = crypto.randomUUID()
+        await redis.set(`user-session-${user?._id}`, sessionId, "EX", 7 * 24 * 60 * 60)
+        await redis.set(`session-${sessionId}`, JSON.stringify({
+            name: user.name,
+            _id: user._id,
+            email: user.email,
+            avatar: user.avatar,
+            credits: user.credits
+        }), "EX", 7 * 24 * 60 * 60)
 
-        const sessionId = crypto.randomUUID();
-
-        // console.log("8. Session ID:", sessionId);
-
-        await redis.set(
-            `session-${sessionId}`,
-            JSON.stringify({
-                name: user.name,
-                _id: user._id,
-                email: user.email,
-                avatar: user.avatar
-            }),
-            "EX",
-            60 * 60 * 24 * 7
-        );
-
-        // console.log("9. Redis session created");
 
         res.cookie("session", sessionId, {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
-            sameSite: "strict",
-            maxAge: 60 * 60 * 24 * 7 * 1000
-        });
+            sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
+            maxAge: 7 * 24 * 60 * 60 * 1000
+        })
+        return res.status(200).json(user)
+    } catch (error) {
+        return res.status(500).json({ message: `login error ${error}` })
+    }
+}
 
-        // console.log("10. Cookie created");
+export const logout = async (req, res) => {
+    try {
+        const sessionId = req.cookies?.session
 
-        // console.log("========== LOGIN SUCCESS ==========");
-
-        return res.status(200).json(user);
+        await redis.del(`session-${sessionId}`)
+        res.clearCookie("session")
+        return res.status(200).json({ message: "Logout successfully" })
 
     } catch (error) {
-        // console.error("========== LOGIN ERROR ==========");
-        // console.error(error);
-        // console.error(error.stack);
-
-        return res.status(500).json({
-            message: error.message
-        });
+        return res.status(500).json({ message: `logout error ${error}` })
     }
-};
+}
 
-export const logout=async(req,res)=>{
 
+
+export const deductCredits = async (req, res) => {
     try {
+        const { userId, amount } = req.body
+        if (!userId) {
+            return res.status(401).json({ message: "userId not found" })
+        }
+        const user = await User.findOneAndUpdate(
+            { _id: userId, credits: { $gte: amount } },
+            {
+                $inc: {
+                    credits: -amount
+                }
+            }, { returnDocument: "after" }).select("credits")
 
-        const sessionId = req.cookies.session;
+        if (!user) {
+            return res.status(401).json({ message: "insufficient credits" })
+        }
+        const sessionId = await redis.get(`user-session-${userId}`)
+        await redis.set(`session-${sessionId}`, JSON.stringify({
+            name: user.name,
+            _id: user._id,
+            email: user.email,
+            avatar: user.avatar,
+            credits: user.credits
+        }), "EX", 7 * 24 * 60 * 60)
+        return res.status(200).json({ credits: user.credits })
+    } catch (error) {
+        return res.status(500).json({ message: `deduct credits ${error}` })
+    }
+}
 
-        if (sessionId) {
-            await redis.del(`session-${sessionId}`);
+export const addCredits = async (req, res) => {
+    try {
+        const { userId, credits } = req.body
+        console.log("credits", credits)
+        if (!userId) {
+            return res.status(401).json({ message: "userId not found" })
         }
 
-        res.clearCookie("session");
+        const user = await User.findById(userId)
 
-        return res.status(200).json({
-            message: "logout successful"
-        });
-    }catch(error){ 
-        console.error("Error during logout:", error)
+        if (!user) {
+            return res.status(401).json({ message: "user not found" })
+        }
+
+        user.credits = (user.credits || 0) + Number(credits)
+        await user.save()
+        const sessionId = await redis.get(`user-session-${userId}`)
+        await redis.set(`session-${sessionId}`, JSON.stringify({
+            name: user.name,
+            _id: user._id,
+            email: user.email,
+            avatar: user.avatar,
+            credits: user.credits
+        }), "EX", 7 * 24 * 60 * 60)
+        return res.status(200).json(user.credits)
+    } catch (error) {
+        return res.status(500).json({ message: `add credits ${error}` })
     }
 }

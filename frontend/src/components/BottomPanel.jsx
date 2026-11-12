@@ -4,7 +4,7 @@ import { TerminalSquare, X } from 'lucide-react'
 import Terminal from './Terminal'
 import { useSelector } from 'react-redux'
 function BottomPanel({ projectId,
-    onClose }) {
+    onClose, onFilesChanged }) {
     const { currentProject } = useSelector(state => state.project)
     projectId = currentProject?._id
     const userId = currentProject?.owner
@@ -34,7 +34,11 @@ function BottomPanel({ projectId,
             </div>
 
             <div className='min-h-0 flex-1'>
-                <Terminal projectId={projectId} userId={userId} />
+                <Terminal
+                    projectId={projectId}
+                    userId={userId}
+                    onFilesChanged={onFilesChanged}
+                />
             </div>
 
         </motion.div>

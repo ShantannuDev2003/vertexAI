@@ -1,6 +1,6 @@
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { graph } from "../graph/graph.js"
-// import { deductCredits } from "../utils/deductCredits.js"
+import { deductCredits } from "../utils/deductCredits.js"
 
 
 const buildHistory = (history) => {
@@ -107,7 +107,7 @@ export const chat = async (req, res) => {
             }
         )
 
-        // await deductCredits({ userId, amount: 10 })
+        await deductCredits({ userId, amount: 10 })
 
 
         let finalMessage = ""
@@ -172,7 +172,7 @@ export const chat = async (req, res) => {
         ) {
             sendEvent(res, "done", {
                 success: true,
-                message: finalMessage || "done"
+                message: "Project completed."
             })
             res.end()
         }

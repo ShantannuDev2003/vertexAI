@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import "@xterm/xterm/css/xterm.css"
 import { io } from "socket.io-client"
 import { Eraser } from "lucide-react"
-function Terminal({ projectId, userId }) {
+function Terminal({ projectId, userId, onFilesChanged }) {
     const containerRef = useRef()
     const terminalRef = useRef()
     const [connected, setConnected] = useState(false)
@@ -31,6 +31,52 @@ function Terminal({ projectId, userId }) {
         terminal.loadAddon(fitAddon)
         terminal.open(containerRef.current)
         terminalRef.current = terminal
+
+        // Handle terminal copy and paste explicitly.
+
+        terminal.attachCustomKeyEventHandler((event) => {
+            if (event.type !== "keydown") return true;
+
+            const isModifierPressed = event.ctrlKey || event.metaKey;
+
+            if (!isModifierPressed) return true;
+
+            const key = event.key.toLowerCase();
+
+            // COPY: Terminal → External application
+            if (key === "c" && terminal.hasSelection()) {
+                event.preventDefault();
+
+                const selectedText = terminal.getSelection();
+
+                navigator.clipboard.writeText(selectedText).catch((error) => {
+                    console.error("Terminal copy failed:", error);
+                });
+
+                return false;
+            }
+
+            // PASTE: External application → Terminal
+            if (key === "v") {
+                // Stop browser/xterm native paste to avoid duplicate insertion.
+                event.preventDefault();
+
+                navigator.clipboard.readText()
+                    .then((text) => {
+                        if (text) {
+                            terminal.paste(text);
+                        }
+                    })
+                    .catch((error) => {
+                        console.error("Terminal paste failed:", error);
+                    });
+
+                return false;
+            }
+
+            return true;
+        });
+
         const fitTerminal = () => {
             try {
                 fitAddon.fit()
@@ -68,6 +114,8 @@ function Terminal({ projectId, userId }) {
             socket.emit("terminal:resize", { rows: terminal.rows, cols: terminal.cols })
             terminal.focus()
         })
+
+        socket.on("terminal:files-changed", onFilesChanged)
 
         const input = terminal.onData((data) => {
             if (!socket.connected) return;
@@ -113,7 +161,7 @@ function Terminal({ projectId, userId }) {
         }
 
 
-    }, [projectId, userId])
+    }, [projectId, userId, onFilesChanged])
 
     const clearTerminal = () => {
         const terminal = terminalRef.current

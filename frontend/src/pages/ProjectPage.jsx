@@ -7,7 +7,7 @@ import { useParams } from 'react-router-dom'
 import { getProjectById } from '../features/project'
 import { useDispatch } from 'react-redux'
 import { setCurrentProject } from '../redux/projectSlice'
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useState } from 'react'
 import { getTree } from '../features/file'
 import { Bot, Code2, Eye, Files, Maximize2, Minimize2, TerminalSquare } from 'lucide-react'
@@ -33,10 +33,10 @@ function ProjectPage() {
     const data = await getProjectById(id)
     dispatch(setCurrentProject(data))
   }
-  const loadTree = async () => {
+  const loadTree = useCallback(async () => {
     const data = await getTree(id)
     setTree(data)
-  }
+  }, [id])
 
   useEffect(() => {
     handleGetProject()
@@ -202,6 +202,7 @@ function ProjectPage() {
               <div className='max-h-[45vh] md:max-h-none'>
                 <BottomPanel
                   projectId={id}
+                  onFilesChanged={loadTree}
                   onClose={() => setShowBottomPanel(false)}
                 />
               </div>

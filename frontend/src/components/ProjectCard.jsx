@@ -56,7 +56,10 @@ function ProjectCard({ project }) {
                     scale: 0.9,
                 }}
                 disabled={loadingStar}
-                onClick={handleToggleStar}
+                onClick={(e) => {
+                    e.stopPropagation()
+                    handleToggleStar()
+                }}
             
                 className={`absolute right-4 top-4 rounded-md p-1 transition-opacity hover:text-amber-400 ${project.starred ? "opacity-100 text-amber-400" : "opacity-0 text-zinc-300 group-hover:opacity-100 dark:text-zinc-600"} ${loadingStar ? "cursor-wait opacity-60" : ""}`}
 
