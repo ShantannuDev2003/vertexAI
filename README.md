@@ -22,6 +22,10 @@ VertexAI is a browser-based coding workspace that combines a project/file explor
 - [Payments and credits](#payments-and-credits)
 - [Local development](#local-development)
 - [Environment configuration](#environment-configuration)
+- [AWS production deployment architecture](#aws-production-deployment-architecture)
+- [Engineering challenges and resolved incidents](#engineering-challenges-and-resolved-incidents)
+- [Scalability architecture and benchmarks](#scalability-architecture-and-benchmarks)
+- [User-facing limitations and workarounds](#user-facing-limitations-and-workarounds)
 - [Deployment notes](#deployment-notes)
 - [Known limitations and security considerations](#known-limitations-and-security-considerations)
 - [Historical documentation note](#historical-documentation-note)
@@ -40,7 +44,7 @@ The reviewed frontend and backend source contain these product areas:
 - Synchronization between the terminal's local workspace and the File Service's stored project tree.
 - Paid plans backed by Razorpay order creation and payment-signature verification, with credits added to the user's account.
 
-The preview implementation in the reviewed source is a lightweight HTML/CSS/JavaScript `srcDoc` preview. It is not a general-purpose runtime for every framework or language.
+The frontend includes a lightweight HTML/CSS/JavaScript `srcDoc` preview. The current Terminal Service **also implements a separate server-backed preview path**: per-project dynamic ports, a static-file server for simple HTML projects, and a spawned Vite development server for supported React/Vite projects. This does not imply arbitrary framework support.
 
 ## Technology stack
 
@@ -83,7 +87,7 @@ flowchart TB
     Redis[("Redis")]
     LLM["Gemini / Groq / OpenRouter"]
     PTY["node-pty: PowerShell or Bash"]
-    Preview["Local preview server :5173"]
+    Preview["Per-project Vite/static preview: dynamic port"]
 
     Browser -->|"REST /api/*"| Gateway
     Browser <-->|"Socket.IO"| Gateway
@@ -122,7 +126,7 @@ The gateway is the browser-facing API boundary. The services own their respectiv
 | AI Service | `8004` | `/api/ai` |
 | Terminal Service | `8005` | `/api/terminal`, `/preview`, Socket.IO proxy |
 | Payment Service | `8006` | `/api/payment` |
-| Vite preview target | `5173` | Proxied by Terminal Service in the reviewed code |
+| Project preview server | Dynamic loopback port | Proxied by Terminal Service for `/preview/:projectId/*` |
 | Redis | `6379` | Shared Redis connection |
 
 Ports are defaults from the source, not a guarantee that a deployment uses these exact values. Environment variables can override service ports and service URLs.
@@ -202,7 +206,7 @@ The page loads project details and the file tree when the project route changes.
 
 ### Preview behavior
 
-The reviewed `Preview.jsx` walks the supplied tree and extracts:
+The `Preview.jsx` component also contains a lightweight in-browser fallback that walks the supplied tree and extracts:
 
 - `index.html`
 - a CSS file ending in `.css`
@@ -210,7 +214,7 @@ The reviewed `Preview.jsx` walks the supplied tree and extracts:
 
 It injects the CSS and JavaScript into the HTML and renders the result through an iframe using `srcDoc` and a sandbox attribute. If no `index.html` exists, it displays an explanatory placeholder.
 
-This preview should be understood as a basic static web preview. It does not install packages, run a Vite build, or execute arbitrary project frameworks by itself. A separate preview proxy path exists in the backend; deployment and runtime configuration must be checked before treating it as a complete hosted preview environment.
+This `srcDoc` path is a basic static preview and does not install packages or run a build. **Separately**, the backend Terminal Service now supports server-backed project previews using dynamic localhost ports and process spawning. See [Development-server preview architecture](#development-server-preview-architecture) below. Frameworks other than supported HTML and React/Vite remain unverified.
 
 ## Backend services
 
@@ -461,9 +465,9 @@ The service ignores common generated/build directories such as `node_modules`, `
 
 #### Preview proxy
 
-The Terminal Service exposes a `/preview` HTTP proxy path. The gateway protects and forwards the preview request with the user ID. The Terminal Service extracts the project ID, asks the File Service for the project's tree as an access check, and proxies the request to `http://127.0.0.1:5173`.
+The Terminal Service exposes `/preview/:projectId/*`. The gateway protects the request and forwards `x-user-id`. The Terminal Service fetches the project tree, materializes a project workspace, and starts or reuses a preview process tracked in `previewProcesses` (an in-memory `Map`). It obtains a dynamic free loopback port; for plain HTML projects it serves static files, and for supported Vite projects it spawns `npm run dev` with a project-specific base path. It waits for the preview port to accept connections, then reverse-proxies the request to `127.0.0.1:<dynamic-port>`. Preview processes are independent of interactive PTY sessions.
 
-This implies a local preview process/server must actually be available at that target for the proxy to return a working app. The reviewed source does not, by itself, establish how that preview process is created, supervised, isolated, or mapped to multiple projects. Treat this as a deployment/runtime dependency that needs verification.
+This design supports multiple projects on different local ports **within one Terminal Service task**. It is not a distributed preview registry: a second ECS task does not automatically have the first task's files or preview process. Framework support and process lifecycle controls remain limited.
 
 ### 7. Payment Service
 
@@ -697,6 +701,185 @@ Firebase Admin initialization imports a service-account JSON file in the reviewe
 
 Do not copy secret values into this README. Configure secrets through local untracked environment files for development and an appropriate secrets manager/runtime secret injection mechanism in production.
 
+
+## AWS production deployment architecture
+
+This section combines the current Docker/service structure with deployment work recorded during the VertexAI AWS rollout. **AWS resource identifiers and observed fixes are historical deployment notes, not a fresh live infrastructure audit.** Do not assume every resource is still present or configured identically.
+
+```mermaid
+flowchart TB
+  User[Browser] --> FE[Frontend CloudFront distribution]
+  FE --> S3[(S3 frontend build bucket)]
+  User --> API[Backend CloudFront distribution]
+  API --> ALB[Application Load Balancer]
+  ALB --> TG[Gateway target group]
+  TG --> GW[Gateway ECS service :8000]
+  GW --> AU[Auth ECS :8001]
+  GW --> PR[Project ECS :8002]
+  GW --> FI[File ECS :8003]
+  GW --> AI[AI ECS :8004]
+  GW --> TE[Terminal ECS :8005]
+  GW --> PA[Payment ECS :8006]
+  GW --> REDIS[(Redis OSS cache)]
+  AU --> REDIS
+  PR --> REDIS
+  PR --> MONGO[(MongoDB)]
+  FI --> MONGO
+  AI --> LLM[External AI providers]
+  TE --> PTY[PTY and per-project preview]
+  ECR[(Amazon ECR images)] -.-> GW
+  ECR -.-> TE
+```
+
+### What each AWS component does
+
+| Component | How VertexAI uses it | Important operational detail |
+|---|---|---|
+| **Docker** | Packages the Gateway and each Node.js microservice with its dependencies, including native terminal dependencies. | Build separate service images; avoid embedding `.env` files and credentials. |
+| **Amazon ECR** | Holds versioned Docker images that ECS task definitions reference. | Push new images and deploy a new task-definition revision to roll out code changes. |
+| **Amazon ECS** | Runs Gateway, Auth, Project, File, AI, Terminal, and Payment as separately managed services in the `vertexai-backend` cluster. | Services maintain desired task counts; independent scaling is possible but is not evidence that autoscaling policies are configured. |
+| **Task definitions** | Specify container image, CPU/memory, exposed port, environment/secrets, logs, networking and runtime configuration for each ECS task. | A new revision must be selected by the ECS service to deploy it. |
+| **VPC and subnets** | Provide private IP networking and routing between ECS tasks, the ALB, and dependent infrastructure. | Internal service DNS and security groups govern reachability; `localhost` cannot address another ECS task. |
+| **Security groups** | Stateful network firewalls controlling traffic into the ALB and between ECS tasks. | The Gateway→Terminal port **8005** required an explicit self-referencing inbound rule on the shared ECS security group. |
+| **ALB (load balancer)** | Accepts backend HTTP traffic from CloudFront and distributes it to healthy Gateway tasks. | Listener rules, target-group attachment, target health, and health-check paths must agree. |
+| **Target groups** | Register ECS task IPs/ports as backend destinations for the ALB. | The observed architecture used the Gateway as the ALB-facing target; internal microservices were reached from Gateway via service networking, not separate public target groups. |
+| **ECS Service Connect / Envoy** | Enables internal service-to-service communication using service aliases (for example `terminal:8005`). | Alias, port, and security-group rules must all be correct; Service Connect does not bypass network ACLs or security groups. |
+| **ElastiCache Redis OSS** | Supplies shared session lookups and cached project/starred-project lists through `ioredis`. | Redis reduces repeated MongoDB queries, but cache invalidation and availability still matter. |
+| **Amazon S3** | Stores built frontend static assets for CDN delivery. | This is **not** the primary persisted project-file store; the File Service stores project files in MongoDB in the reviewed source. |
+| **CloudFront** | Frontend distribution delivers the React/Vite build; backend distribution exposes the public API, terminal socket and preview paths over HTTPS. | Cache behaviors, allowed methods, origin request policies, cookies, and WebSocket/SSE handling must match each path. |
+
+### Deployment identifiers used during troubleshooting
+
+- ECS cluster: `vertexai-backend` (region `us-east-1`).
+- ALB hostname: `vertexai-lb-320948763.us-east-1.elb.amazonaws.com`.
+- Backend distribution: `https://d2xhnf11w0az17.cloudfront.net`.
+- Frontend distribution: `https://d11d0eqp4vw132.cloudfront.net`.
+- Shared ECS security group investigated: `sg-046775dd63c31aab0`.
+- The observed Service Connect topology included internal aliases such as `terminal:8005`.
+
+### Typical request paths
+
+**Frontend:** Browser → frontend CloudFront → S3 static assets → React application.
+
+**Authenticated API:** React/Axios with session cookie → backend CloudFront → ALB → Gateway → Redis session check → internal ECS service → MongoDB/Redis as needed → response.
+
+**AI stream:** Browser → CloudFront → ALB → Gateway → AI Service → LangGraph/model and File Service → SSE response over the same HTTP connection.
+
+**Terminal:** Browser Socket.IO → CloudFront/ALB → Gateway upgrade proxy → Terminal ECS task → node-pty shell and temporary project workspace.
+
+**Preview:** Browser iframe `/preview/:projectId/` → CloudFront → ALB → Gateway authorization → Terminal Service → dynamically allocated local Vite/static server → proxied HTML/assets.
+
+## Engineering challenges and resolved incidents
+
+### 1. Files disappearing during AI code generation
+
+**Observed symptom:** Files created or updated by the AI sometimes disappeared from the explorer while an interactive terminal session was open. **Observed workaround:** Close/disconnect the terminal before asking AI to generate or substantially rewrite project files, then reopen it after generation finishes.
+
+**Technical explanation:** The persisted File Service tree (MongoDB) and the terminal's temporary on-disk workspace are separate representations. The terminal watcher sends local changes back to the File Service, while periodic polling copies database changes into the workspace. AI tool calls update the File Service independently. If the terminal workspace is stale, a watcher event, delete inference, or overlapping sync can misinterpret a missing file as an intentional deletion or overwrite a newer version. Closing the terminal stops its watcher/polling session and reduces that race. This is a **plausible cause supported by the synchronization design**, not a proven single root cause for every disappearance.
+
+**Engineering work still needed:** Single-writer/version-aware reconciliation, optimistic concurrency checks, explicit deletion tombstones, per-project sync locking, conflict resolution, and tests for simultaneous AI/editor/terminal writes. **Do not treat the workaround as a data-loss guarantee.**
+
+### 2. SSE streaming through the API gateway and reverse proxies
+
+**Challenge:** AI generation uses a long-lived HTTP response rather than a normal one-shot JSON API. Standard proxy buffering, connection idle timeouts, delayed header flushing, and premature client disconnects can make progress events arrive late or terminate unexpectedly. A provider's slow first token can also leave the connection idle.
+
+**Current mitigations visible in source:** The AI controller sets SSE response headers, calls `flushHeaders()` when supported, sends a `start` event, emits periodic comment heartbeats (15 seconds), detects connection closure, and streams LangGraph tool/message events. The frontend consumes the stream as events. The gateway forwards `/api/ai` to the AI Service. **The exact historical SSE failure and its one definitive fix cannot be proven from this code snapshot alone.**
+
+**Remaining requirements:** Confirm proxy idle/read timeouts, disable response buffering where applicable, verify CloudFront/ALB behavior with real long-running streams, propagate cancellation to model/tool calls, and test reconnection and duplicate-tool prevention.
+
+### 3. Why React development-server previews need a proxy
+
+A React/Vite project typically serves an HTML entry point, transformed JavaScript modules, CSS, and assets over a running HTTP development server. Simply injecting source files into `iframe.srcDoc` cannot reproduce Vite's module transformation, dependency resolution, and hot-module workflow.
+
+A process listening at `localhost:5173` **inside an ECS container** is reachable from that container's network namespace, **not from the user's laptop browser**. If the browser navigates to `http://localhost:5173`, it attempts to connect to port 5173 on the **user's own machine**. Therefore VertexAI exposes a public, authenticated `/preview/:projectId/` route and reverse-proxies it to the preview server's loopback port inside the Terminal task. The current implementation allocates separate ports per project and supports static HTML and supported Vite projects. Other frameworks and WebSocket-based hot reload need explicit compatibility testing.
+
+### 4. Preview HTTP 504: ECS security-group misconfiguration
+
+**Observed incident:** The deployed preview URL `/preview/<projectId>/` returned an upstream timeout / CloudFront 504 even though the Terminal Service and Gateway were running.
+
+**Root cause found during AWS troubleshooting:** The ECS security group allowed inbound TCP `8005` from the ALB security group but did **not** allow Gateway ECS tasks to connect to Terminal ECS tasks on that port. The Gateway and Terminal communicate over the internal network; ALB ingress alone is insufficient.
+
+**Fix applied:** Add inbound TCP port `8005` on security group `sg-046775dd63c31aab0`, with the **same security group** as the source (self-reference). The recorded CLI operation was:
+
+```powershell
+aws ec2 authorize-security-group-ingress --group-id sg-046775dd63c31aab0 --protocol tcp --port 8005 --source-group sg-046775dd63c31aab0 --region us-east-1
+```
+
+The resulting rule was recorded as `sgr-03a54518d6f2a3d58`. The preview subsequently loaded and the terminal connected after refresh. **This was an AWS network configuration fix, not a frontend or backend code change.** Do not rerun the command blindly; check whether the rule already exists.
+
+### 5. ALB / ECS Gateway routing errors
+
+During deployment, `/api/project` requests returned 404 while `/api/auth` could return 200. The investigation covered Gateway proxy paths, ECS task-definition routing, ALB listeners and target groups, and service discovery. This illustrates why a healthy ALB target or a working `/api/auth` route does **not** prove all microservice routes are wired correctly. Verify each route end to end and check whether its response is from Gateway, the intended service, or an unrelated service. The complete resolution of every historical 404 is not established by the materials reviewed here.
+
+### 6. Other implementation challenges worth tracking
+
+- **Bidirectional sync:** Root-level paths, rename events, watcher debounce, and avoiding unintended deletes required special handling; see `backend/services/terminal/TERMINAL_FILE_SYNC.md`.
+- **AI provider reliability:** Rate limits, unavailable provider credentials, tool-call formatting, and fallback/cooldown logic complicate reliable generation; configured providers and quotas can differ between environments.
+- **Deployment networking:** ECS Service Connect DNS names, ports, security groups, and target health must be tested together rather than independently.
+- **Payment readiness:** Razorpay test credentials and live credentials are distinct. Historical deployment work identified that VertexAI's website approval needed separate confirmation before treating live payments as enabled.
+
+## Scalability architecture and benchmarks
+
+### Why this architecture can scale differently from a single-server MERN application
+
+A conventional small MERN deployment often runs all Express endpoints, business logic, socket sessions, and background work in one Node.js process or one deployable server. Increasing capacity then often means scaling **everything together**, and one expensive task can contend for the same CPU/memory/event loop as unrelated requests.
+
+VertexAI separates Gateway, Auth, Project, File, AI, Terminal, and Payment into independently deployed ECS services. This enables **service-specific capacity planning**: for example, adding AI replicas need not require adding Payment replicas. It also introduces network hops, deployment coordination, distributed tracing needs, and failure modes that a monolith may not have. A MERN monolith can itself be horizontally scaled behind a load balancer, so microservices are **not automatically faster or more scalable**.
+
+| Building block | Contribution | What it does **not** guarantee |
+|---|---|---|
+| Microservices on ECS | Independently deployable and potentially independently scalable compute | ECS desired task counts or autoscaling policies must actually be configured and tested |
+| ALB | Spreads incoming traffic across healthy Gateway targets | Does not automatically balance every internal service or preserve stateful PTY sessions |
+| Gateway | Centralized routing, cookie-session validation, protected API boundary, and internal service forwarding | Adds a hop and can itself become a bottleneck |
+| Redis OSS | Shared session store and project-list caching; reduces some database reads | Does not eliminate MongoDB bottlenecks or solve terminal state affinity |
+| ECS Service Connect | Internal service naming/connectivity between tasks | Does not share local files, in-memory process maps, or running preview servers |
+| CloudFront | CDN delivery and public HTTPS entry point | A cached endpoint benchmark may not measure ECS throughput |
+
+### Stateful scaling bottlenecks
+
+- **Terminal sessions:** Socket.IO connections, `node-pty` processes, watcher timers, and the `sessions` map are task-local. A different Terminal replica cannot resume an existing PTY automatically.
+- **Preview servers:** `previewProcesses` and dynamic localhost ports are task-local; project requests must reach the same task or a routing/orchestration layer must locate the owner.
+- **Temporary workspaces:** `os.tmpdir()/vertex-ai/<projectId>` is local container storage, not a shared persistent volume. ECS restarts and placement on another task can lose that materialized copy; MongoDB-backed File Service records remain the intended source of truth.
+- **AI fallback state:** Provider cooldowns are stored in process memory, so replicas can have different provider health views.
+- **Database and downstream limits:** MongoDB capacity, Redis capacity, external AI API rate limits, and model latency remain shared constraints regardless of how many ECS tasks run.
+
+### Performance testing status (14 November 2026)
+
+Tools: Grafana k6 was installed successfully, but the first actual benchmark used **Autocannon v9.0.0** from Windows PowerShell, without adding any project test files. The read-only test endpoint was `GET https://d2xhnf11w0az17.cloudfront.net/api/auth`.
+
+| Test | Setting | Observed result |
+|---|---|---|
+| Baseline | 1 HTTP connection, pipeline 1, 15 seconds | 37 requests in 15.14 seconds |
+| Average latency | Baseline | **416.06 ms** |
+| Median latency | Baseline | **451 ms** |
+| p97.5 / p99 | Baseline | **970 ms / 970 ms** |
+| Throughput | Baseline | **2.4 requests/second** (sampled average) |
+| Cache spot-check | Five subsequent sequential GETs | Five HTTP 200 responses; five `X-Cache: Miss from cloudfront` |
+| 10, 25, 50, 100 connections | Planned | **Not run** |
+| AI SSE / Socket.IO / preview concurrency | Planned | **Not run** |
+| Stress / ECS autoscaling verification | Planned | **Not run** |
+
+**Interpretation:** These results measure the public request path including client network, CloudFront, ALB, Gateway, and Auth Service. Five cache misses are encouraging but do not prove all benchmark requests reached ECS. Autocannon did not establish an HTTP error rate in this output, and a connection is not equivalent to an interactive user. **No production user-capacity or autoscaling claim is justified yet.**
+
+Benchmark command used:
+
+```powershell
+npm exec --yes --package=autocannon@9.0.0 -- autocannon -c 1 -d 15 -p 1 https://d2xhnf11w0az17.cloudfront.net/api/auth
+```
+
+**Next planned sequence:** 10 → 25 → 50 → 100 HTTP connections against safe read-only endpoints; then isolated AI streaming, Socket.IO, and preview tests; then carefully controlled stress tests; finally compare ECS desired/running task counts, CloudWatch CPU/memory, target response time, and autoscaling behavior. Run costly or destructive tests in staging where possible.
+
+## User-facing limitations and workarounds
+
+1. **Files may disappear while AI generation and terminal synchronization overlap.** User-observed mitigation: close the terminal before AI-driven bulk file creation or rewriting; reopen it afterward. This does not remove the underlying synchronization race or guarantee zero data loss.
+2. **Large, all-at-once prompts may fail or produce incomplete projects.** The single-agent LangGraph loop has a `recursionLimit: 40`, the controller supplies only the latest six chat-history entries, and providers have context/output-token budgets, tool-call limits, rate limits, and variable reliability. A large request can require many dependent read/create/update tool rounds, increasing latency and the chance of truncated reasoning, incomplete file writes, provider failure, or graph termination. **Practical approach:** ask for project scaffolding first, then components/pages, then integration and fixes in smaller prompts; inspect files between steps. Splitting requests improves reliability but is not a hard technical guarantee.
+3. **Framework preview compatibility is limited.** The AI may generate code for Angular, Next.js, and other frameworks to some extent, but the preview implementation specifically targets static HTML and supported React/Vite development servers. Angular/Next.js startup commands, routing, build pipelines, SSR, WebSocket/HMR behavior, and deployment requirements are not guaranteed. Code generation capability and preview runtime support are different things.
+4. **One terminal console per browser tab.** The UI provides one terminal panel/session rather than VS Code-style multiple independently managed terminal tabs. Multiple browser tabs can create separate sockets/sessions, but the application does not offer a supported multi-terminal tab manager; sharing one project workspace across sockets can introduce synchronization conflicts.
+5. **Terminal state is not durable across ECS task restarts.** Active shell processes and task-local files/process maps do not survive replacement automatically; persistent project files must be reconciled through the File Service.
+6. **Preview is not a secure arbitrary-code sandbox.** Running user-controlled scripts and dependencies in a shared service task needs stronger isolation, CPU/memory/process quotas, network controls, and cleanup policies before broad public use.
+7. **AI completion is not runtime validation.** The agent does not automatically run a complete project test suite or use an independent reviewer agent; generated code may need manual debugging.
+8. **Billing and concurrency need hardening.** Credit deduction and payment verification have partial-failure/idempotency risks, and load testing has not yet established production capacity.
+
 ## Deployment notes
 
 Each backend service directory includes a Dockerfile in the supplied snapshot. The backend is organized as multiple separately runnable processes, so deployment requires:
@@ -712,7 +895,7 @@ Each backend service directory includes a Dockerfile in the supplied snapshot. T
 
 The Terminal Service uses local temporary storage and in-memory socket-to-PTY sessions. A container restart or task replacement can interrupt active terminal sessions. Multiple replicas do not automatically share PTY sessions or local workspaces. Do not scale the Terminal Service horizontally without session affinity/routing and workspace/session lifecycle design.
 
-The preview proxy targets `127.0.0.1:5173` inside the Terminal Service process environment. Ensure the intended preview server is actually running and safely isolated. A single fixed local port is not, by itself, a multi-tenant preview architecture.
+The current preview proxy targets a **dynamically allocated `127.0.0.1:<port>`** in the Terminal Service task. The preview registry and process live in that task only; multiple tasks need project-affinity routing or shared orchestration. Preview processes require limits, cleanup, and isolation.
 
 The supplied Compose file starts Redis only; it is not a complete local stack definition for all services.
 
@@ -737,7 +920,7 @@ These are important review findings from the supplied source snapshot. They shou
 - Killing a PTY does not necessarily terminate every child/grandchild process started by the shell.
 - Temporary workspace cleanup and retention need an explicit lifecycle policy.
 - Filesystem watcher behavior, periodic sync races, rename detection, and simultaneous editor/terminal writes need stress testing. Conflicting concurrent changes can otherwise overwrite user work.
-- The preview target is a local fixed port; multi-project preview isolation and process supervision are not established by the reviewed source.
+- The current preview uses dynamic ports per project, but process isolation, distributed routing across ECS tasks, resource quotas, and cleanup remain incomplete.
 
 ### AI reliability and cost controls
 
