@@ -14,6 +14,8 @@ import path from "path";
 import fs from "fs/promises";
 import fsWatch from "fs";
 import pty from "node-pty";
+import { spawn } from "child_process";
+import net from "net";
 
 dotenv.config();
 
@@ -23,6 +25,23 @@ app.use(express.json());
 const previewProxy = httpProxy.createProxyServer({
   changeOrigin: true,
   ws: true,
+});
+
+previewProxy.on("error", (error, req, res) => {
+  console.error("[preview proxy] connection error:", error.message);
+
+  if (res && !res.headersSent) {
+    res.writeHead(502, {
+      "Content-Type": "application/json",
+    });
+
+    res.end(JSON.stringify({
+      success: false,
+      message: "Preview server is not available",
+    }));
+  } else if (res && !res.writableEnded) {
+    res.end();
+  }
 });
 const fileServiceUrl =
   process.env.FILE_SERVICE_URL || "http://localhost:8003";
@@ -39,6 +58,279 @@ const io = new Server(server, {
 });
 
 const sessions = new Map();
+
+// Preview servers are independent of interactive terminal sessions.
+const previewProcesses = new Map();
+
+const getAvailablePort = () => {
+  return new Promise((resolve, reject) => {
+    const portServer = net.createServer();
+
+    portServer.once("error", reject);
+
+    portServer.listen(0, "127.0.0.1", () => {
+      const port = portServer.address().port;
+
+      portServer.close((error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(port);
+        }
+      });
+    });
+  });
+};
+
+const startPreviewServer = async (projectId) => {
+  const existing = previewProcesses.get(projectId);
+
+  if (existing) {
+    if (
+      existing.kind === "static" &&
+      existing.server.listening
+    ) {
+      return existing;
+    }
+
+    if (
+      existing.kind === "vite" &&
+      existing.process.exitCode === null
+    ) {
+      return existing;
+    }
+  }
+
+  const root = workspace(projectId);
+  const port = await getAvailablePort();
+
+  // Check whether this project has a development script.
+  let hasDevScript = false;
+
+  try {
+    const packageJson = JSON.parse(
+      await fs.readFile(path.join(root, "package.json"), "utf8")
+    );
+
+    hasDevScript = Boolean(packageJson.scripts?.dev);
+  } catch {
+    hasDevScript = false;
+  }
+
+  // Plain HTML/CSS/JS project: serve files directly.
+  if (!hasDevScript) {
+    const mimeTypes = {
+      ".html": "text/html",
+      ".css": "text/css",
+      ".js": "application/javascript",
+      ".mjs": "application/javascript",
+      ".json": "application/json",
+      ".svg": "image/svg+xml",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".ico": "image/x-icon",
+      ".webp": "image/webp",
+      ".txt": "text/plain",
+    };
+
+    const staticServer = http.createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url, "http://localhost");
+        const prefix = `/preview/${projectId}`;
+
+        if (
+          url.pathname !== prefix &&
+          !url.pathname.startsWith(`${prefix}/`)
+        ) {
+          return res.writeHead(404).end("Not found");
+        }
+
+        let relativePath = decodeURIComponent(
+          url.pathname.slice(prefix.length)
+        );
+
+        if (!relativePath || relativePath === "/") {
+          relativePath = "/index.html";
+        }
+
+        const filePath = path.resolve(
+          root,
+          `.${relativePath}`
+        );
+
+        const relativeToRoot = path.relative(root, filePath);
+
+        if (
+          relativeToRoot.startsWith("..") ||
+          path.isAbsolute(relativeToRoot)
+        ) {
+          return res.writeHead(403).end("Forbidden");
+        }
+
+        let finalPath = filePath;
+
+        const stats = await fs.stat(finalPath);
+
+        if (stats.isDirectory()) {
+          finalPath = path.join(finalPath, "index.html");
+        }
+
+        const content = await fs.readFile(finalPath);
+        const extension = path.extname(finalPath).toLowerCase();
+
+        res.writeHead(200, {
+          "Content-Type":
+            mimeTypes[extension] || "application/octet-stream",
+          "Cache-Control": "no-cache",
+        });
+
+        if (req.method === "HEAD") {
+          return res.end();
+        }
+
+        res.end(content);
+      } catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+          return res.writeHead(404).end("File not found");
+        }
+
+        console.error(
+          `[preview:${projectId}] static server error:`,
+          error.message
+        );
+
+        if (!res.headersSent) {
+          res.writeHead(500);
+        }
+
+        res.end("Preview server error");
+      }
+    });
+
+    await new Promise((resolve, reject) => {
+      staticServer.once("error", reject);
+
+      staticServer.listen(port, "127.0.0.1", () => {
+        staticServer.removeListener("error", reject);
+        resolve();
+      });
+    });
+
+    const entry = {
+      kind: "static",
+      server: staticServer,
+      port,
+      root,
+    };
+
+    previewProcesses.set(projectId, entry);
+
+    console.log(
+      `[preview:${projectId}] Static preview ready on port ${port}`
+    );
+
+    return entry;
+  }
+
+  // React/Vite project: retain the existing Vite startup behavior.
+  const isWindows = process.platform === "win32";
+
+  const previewCommand = isWindows
+    ? (process.env.ComSpec || "cmd.exe")
+    : "npm";
+
+  const previewArgs = isWindows
+    ? [
+      "/d",
+      "/s",
+      "/c",
+      `npm.cmd run dev -- --host 127.0.0.1 --port ${port} --strictPort --base /preview/${projectId}/`,
+    ]
+    : [
+      "run",
+      "dev",
+      "--",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--strictPort",
+      "--base",
+      `/preview/${projectId}/`,
+    ];
+
+  const previewProcess = spawn(previewCommand, previewArgs, {
+    cwd: root,
+    env: {
+      ...process.env,
+      BROWSER: "none",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+
+  const entry = {
+    kind: "vite",
+    process: previewProcess,
+    port,
+    root,
+  };
+
+  previewProcesses.set(projectId, entry);
+
+  previewProcess.stdout.on("data", (data) => {
+    console.log(`[preview:${projectId}] ${data.toString().trim()}`);
+  });
+
+  previewProcess.stderr.on("data", (data) => {
+    console.error(`[preview:${projectId}] ${data.toString().trim()}`);
+  });
+
+  previewProcess.on("exit", (code) => {
+    console.log(`[preview:${projectId}] exited with code ${code}`);
+
+    if (previewProcesses.get(projectId) === entry) {
+      previewProcesses.delete(projectId);
+    }
+  });
+
+  return entry;
+};
+
+const waitForPreviewReady = (port, timeout = 30000) => {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+
+    const check = () => {
+      const socket = net.createConnection({
+        host: "127.0.0.1",
+        port,
+      });
+
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve(true);
+      });
+
+      socket.once("error", () => {
+        socket.destroy();
+
+        if (Date.now() - startedAt >= timeout) {
+          reject(
+            new Error(`Preview server did not start on port ${port}`)
+          );
+          return;
+        }
+
+        setTimeout(check, 300);
+      });
+    };
+
+    check();
+  });
+};
 const ignoredDirectories = new Set([
   "node_modules",
   ".git",
@@ -439,6 +731,15 @@ const synchronizeWorkspace = async (session) => {
         );
 
       for (const entry of missingEntries) {
+        console.log("[TERMINAL SYNC DELETE]", {
+          projectId: session.projectId,
+          relativePath: entry.relativePath,
+          fileId: entry._id,
+          type: entry.type,
+          snapshotHadEntry: session.databaseSnapshot?.has(entry.relativePath),
+          diskHadEntry: diskByPath.has(entry.relativePath),
+        });
+
         await requestFileService(`/${entry._id}`, session.userId, {
           method: "DELETE",
         });
@@ -479,6 +780,11 @@ const synchronizeDatabaseToWorkspace = async (session) => {
     const tree = await getTree(session.projectId, session.userId);
     const { nodes } = workspaceNodes(tree);
     const entries = flattenTree(nodes);
+    console.log("[TERMINAL DB PATHS]", {
+      projectId: session.projectId,
+      workspace: session.cwd,
+      paths: entries.map((entry) => entry.relativePath),
+    });
     const currentByPath = new Map(
       entries.map((entry) => [entry.relativePath, entry])
     );
@@ -693,12 +999,26 @@ app.use("/preview", async (req, res) => {
     }
 
     // Preserve the full Vite base path.
+    // Strip /preview/:projectId so Vite receives its own application path.
+    // Start or reuse the independent Preview server for this project.
+    const previewServer = await startPreviewServer(projectId);
+
+    // Wait until Vite is accepting connections.
+    await waitForPreviewReady(previewServer.port);
+
+    // Strip /preview/:projectId so Vite receives its own application path.
+    // Preserve the complete project-specific Vite base path.
+    // const previewPath = req.originalUrl.replace(
+    //   /^\/preview\/[^/]+/,
+    //   ""
+    // );
     req.url = req.originalUrl;
+ 
+   
 
     previewProxy.web(req, res, {
-      target: "http://127.0.0.1:5173",
+      target: `http://127.0.0.1:${previewServer.port}`,
     });
-
   } catch (error) {
     console.error("[preview proxy] error:", error.message);
 

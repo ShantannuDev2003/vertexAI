@@ -34,7 +34,24 @@ app.use(
 )
 app.use("/api/auth", proxy(process.env.AUTH_SERVICE || "http://localhost:8001"))
 app.use("/api/project", protect, proxyWithHeader(process.env.PROJECT_SERVICE || "http://localhost:8002"))
-app.use("/api/file", protect, proxyWithHeader(process.env.FILE_SERVICE || "http://localhost:8003"))
+app.use(
+    "/api/file",
+    protect,
+    (req, res, next) => {
+        console.log("[GATEWAY FILE REQUEST]", {
+            timestamp: new Date().toISOString(),
+            method: req.method,
+            originalUrl: req.originalUrl,
+            origin: req.headers.origin || null,
+            referer: req.headers.referer || null,
+            userAgent: req.headers["user-agent"] || null,
+            userId: req.user?._id?.toString() || null
+        })
+
+        next()
+    },
+    proxyWithHeader(process.env.FILE_SERVICE || "http://localhost:8003")
+)
 app.use("/api/ai", protect, proxyWithHeader(process.env.AI_SERVICE || "http://localhost:8004"))
 app.use("/api/terminal", protect, proxy(process.env.TERMINAL_SERVICE || "http://localhost:8005"))
 app.use("/api/payment", protect, proxyWithHeader(process.env.PAYMENT_SERVICE || "http://localhost:8006"))
@@ -47,6 +64,14 @@ app.get("/", (req, res) => {
 const socketProxy = httpProxy.createProxyServer({
     target: process.env.TERMINAL_SERVICE || "http://localhost:8005",
     ws: true
+})
+
+socketProxy.on("error", (error, req, socket) => {
+    console.error("[gateway socket proxy] error:", error.message)
+
+    if (socket && !socket.destroyed) {
+        socket.destroy()
+    }
 })
 
 app.use("/socket.io", (req, res) => {

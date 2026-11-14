@@ -1,23 +1,28 @@
+
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { graph } from "../graph/graph.js"
 import { deductCredits } from "../utils/deductCredits.js"
-
 
 const buildHistory = (history) => {
     if (!Array.isArray(history)) {
         return []
     }
+
     const recents = history.slice(-6)
-    return recents.filter((recent) => recent?.content && (recent.role == "user" || recent.role == "assistant"))
+
+    return recents
+        .filter((recent) =>
+            recent?.content &&
+            (recent.role == "user" || recent.role == "assistant")
+        )
         .map((msg) => {
             if (msg.role == "user") {
                 return new HumanMessage(msg.content)
             }
+
             return new AIMessage(msg.content)
         })
-
 }
-
 
 const sendEvent = (res, type, data) => {
     if (res.writableEnded || res.destroyed) {
@@ -34,14 +39,14 @@ const sendEvent = (res, type, data) => {
     }
 }
 
-
 export const chat = async (req, res) => {
-
-
     let disconnected = false
+    let heartbeatTimer = null
+
     try {
         const { projectId, message, history = [] } = req.body
         const userId = req.headers["x-user-id"]
+
         if (!projectId) {
             return res.status(400).json({
                 message: "project is id not found"
@@ -54,45 +59,60 @@ export const chat = async (req, res) => {
             })
         }
 
-
-
         res.setHeader(
             "Content-Type",
             "text/event-stream; charset=utf-8"
-        );
+        )
 
         res.setHeader(
             "Cache-Control",
             "no-cache, no-transform"
-        );
+        )
 
         res.setHeader(
             "Connection",
             "keep-alive"
-        );
+        )
 
         res.setHeader(
             "X-Accel-Buffering",
             "no"
-        );
+        )
 
         res.flushHeaders?.()
 
-
         res.once("close", () => {
-            disconnected = true
-            console.log("AI CLIENT DISCONNECTED")
+            if (!res.writableFinished) {
+                disconnected = true
+                console.log("AI CLIENT DISCONNECTED")
+            }
+
+            if (heartbeatTimer) {
+                clearInterval(heartbeatTimer)
+                heartbeatTimer = null
+            }
         })
+
+        // Send an SSE comment every 15 seconds to keep
+        // the CloudFront origin response connection active.
+        heartbeatTimer = setInterval(() => {
+            if (
+                !disconnected &&
+                !res.writableEnded &&
+                !res.destroyed
+            ) {
+                res.write(": keep-alive\n\n")
+            }
+        }, 15000)
 
         sendEvent(res, "start", {
             success: true,
             message: "AI Started"
         })
 
-
-
         const graphData = graph({ projectId, userId })
         const messages = buildHistory(history)
+
         messages.push(
             new HumanMessage(message.trim())
         )
@@ -109,105 +129,114 @@ export const chat = async (req, res) => {
 
         await deductCredits({ userId, amount: 10 })
 
-
         let finalMessage = ""
 
         for await (const chunk of stream) {
-
-            if (disconnected || res.writableEnded) break;
+            if (disconnected || res.writableEnded) {
+                break
+            }
 
             if (chunk?.agent) {
                 const agentMessages = chunk.agent?.messages
                 const last = agentMessages[agentMessages.length - 1]
+
                 if (!last) {
-                    continue;
+                    continue
                 }
 
-                if (Array.isArray(last.tool_calls) && last.tool_calls?.length) {
+                if (
+                    Array.isArray(last.tool_calls) &&
+                    last.tool_calls.length
+                ) {
                     for (const call of last.tool_calls) {
                         sendEvent(res, "tool_start", {
                             tool: call.name,
                             args: call.args || {}
                         })
                     }
-                    continue;
+
+                    continue
                 }
 
                 let content = ""
+
                 if (typeof last.content == "string") {
                     content = last.content
                 } else if (Array.isArray(last.content)) {
                     content = last.content
                         .filter((item) => item.type == "text")
-                        .map((item) => item.text).join("")
+                        .map((item) => item.text)
+                        .join("")
                 }
 
                 if (content) {
                     finalMessage = content
-                    sendEvent(res, "message", { content })
-                }
 
+                    sendEvent(res, "message", {
+                        content
+                    })
+                }
             }
 
             if (chunk.tools) {
                 const toolMessages = chunk.tools?.messages || []
+
                 for (const toolMessage of toolMessages) {
                     let result = toolMessage.content
+
                     try {
-                        result = typeof result == "string" ? JSON.parse(result) : result
+                        result = typeof result == "string"
+                            ? JSON.parse(result)
+                            : result
                     } catch (error) {
-                        continue;
+                        continue
                     }
+
                     if (result?.operation) {
                         sendEvent(res, result.operation, result)
                     }
-
-
                 }
             }
         }
 
-        if (!disconnected &&
-            !res.writableEnded
-        ) {
+        if (!disconnected && !res.writableEnded) {
             sendEvent(res, "done", {
                 success: true,
                 message: "Project completed."
             })
+
             res.end()
         }
 
-
-
     } catch (error) {
         console.log("AI STRAM ERROR:", error)
+
         if (disconnected) {
-            return;
+            return
         }
+
         if (res.headersSent) {
             sendEvent(res, "error", {
                 success: false,
-                message:
-                    error?.message ||
-                    "AI request failed.",
+                message: error?.message || "AI request failed."
             })
 
             if (!res.writableEnded) {
                 res.end()
             }
-            return;
+
+            return
         }
 
         return res.status(500).json({
             success: false,
-            message:
-                error?.message ||
-                "AI request failed.",
-        });
+            message: error?.message || "AI request failed."
+        })
 
-
-
-
+    } finally {
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer)
+            heartbeatTimer = null
+        }
     }
-
 }

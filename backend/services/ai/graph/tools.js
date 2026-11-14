@@ -214,20 +214,39 @@ RULES:
             description: `
 Create a NEW FILE.
 
-RULES:
+MANDATORY REQUIREMENT:
+Every create_file call MUST include parentId.
+parentId is REQUIRED. Never omit it.
 
-1. Use get_tree first when project structure is unknown.
-2. Use exact folder ID as parentId.
-3. Never create duplicate files.
-4. Send complete file content.
-5. Create folders before files inside them.
-6. Never use terminal commands to create files.
-7. Do not call get_file immediately after creating a file.
-8. Continue creating all required files.
-9. Do not stop after creating only one file.
+HOW TO SELECT parentId:
 
-For a React/Vite project, create ALL required files.
+1. Call get_tree first if the project structure is unknown.
+2. For a file directly inside the project root, use the _id
+   of the top-level project folder returned by get_tree.
+3. For a file inside a nested folder, use that folder's exact _id.
+4. Never use a file ID as parentId.
+5. Never guess or invent an ID.
+6. Never send parentId as null, undefined, or an empty string.
 
+EXAMPLE:
+
+{
+  "name": "index.html",
+  "parentId": "EXACT_FOLDER_ID_FROM_GET_TREE",
+  "language": "html",
+  "content": "COMPLETE_FILE_CONTENT"
+}
+
+OTHER RULES:
+
+1. Never create duplicate files.
+2. Send complete file content.
+3. Create folders before files inside them.
+4. Never use terminal commands to create files.
+5. Do not call get_file immediately after creating a file.
+6. Continue creating all required files.
+7. Do not stop after creating only one file.
+8. For React/Vite projects, create ALL required files.
 `,
             schema: z.object({
                 name: z.string().trim().min(1),

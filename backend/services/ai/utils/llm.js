@@ -59,7 +59,11 @@ const createProvider = (provider, apiKey) => {
     }
 
     if (provider === "openrouter") {
-        return new ChatOpenRouter({ ...common, model })
+        return new ChatOpenRouter({
+            ...common,
+            model,
+            maxTokens: 1800
+        })
     }
 
     throw new Error(`Unsupported AI provider: ${provider}`)

@@ -7,7 +7,7 @@ import { useParams } from 'react-router-dom'
 import { getProjectById } from '../features/project'
 import { useDispatch } from 'react-redux'
 import { setCurrentProject } from '../redux/projectSlice'
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useState } from 'react'
 import { getTree } from '../features/file'
 import { Bot, Code2, Eye, Files, Maximize2, Minimize2, TerminalSquare } from 'lucide-react'
@@ -33,9 +33,22 @@ function ProjectPage() {
     const data = await getProjectById(id)
     dispatch(setCurrentProject(data))
   }
+  const treeRequestId = useRef(0)
+
   const loadTree = useCallback(async () => {
+    const requestId = ++treeRequestId.current
+
     const data = await getTree(id)
-    setTree(data)
+
+    // Ignore responses from older requests.
+    if (requestId !== treeRequestId.current) {
+      return
+    }
+
+    // Never replace a valid tree with an invalid response.
+    if (Array.isArray(data)) {
+      setTree(data)
+    }
   }, [id])
 
   useEffect(() => {
@@ -156,7 +169,7 @@ function ProjectPage() {
 
           <div className='flex min-h-0 flex-1 overflow-hidden'>
             {showPreview ? (
-              <Preview tree={tree} />
+              <Preview tree={tree} projectId={id} />
             ) :
 
               <Editor
@@ -179,7 +192,7 @@ function ProjectPage() {
 
               >
 
-                <Preview tree={tree} />
+                <Preview tree={tree} projectId={id} />
                 <motion.div
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}

@@ -307,6 +307,17 @@ export const deleteFile = async (req, res) => {
     try {
         const userId = req.headers["x-user-id"]
 
+        console.log("[FILE DELETE REQUEST]", {
+            timestamp: new Date().toISOString(),
+            fileId: req.params.id,
+            userId,
+            method: req.method,
+            url: req.originalUrl,
+            origin: req.headers.origin || null,
+            referer: req.headers.referer || null,
+            userAgent: req.headers["user-agent"] || null
+        })
+
         // Soft delete:
         // We don't physically remove the document.
         //

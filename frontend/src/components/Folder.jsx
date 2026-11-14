@@ -327,7 +327,12 @@ function Folder({
 
                     {node.children.map((child) => (
                         <Folder
-                            projectId={projectId} tree={tree} openFile={openFile} reloadTree={reloadTree} node={child}
+                            key={child._id}
+                            projectId={projectId}
+                            tree={tree}
+                            openFile={openFile}
+                            reloadTree={reloadTree}
+                            node={child}
                         />
                     ))}
                 </motion.div>

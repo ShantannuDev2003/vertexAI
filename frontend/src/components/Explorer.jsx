@@ -53,15 +53,16 @@ function Explorer(
                     </div>
                 ) : (
 
-                    tree.map((node) => (
-                        <Folder
-                            projectId={projectId}
-                            node={node}
-                            tree={tree}
-                            reloadTree={reloadTree}
-                            openFile={openFile}
-                        />
-                    ))
+                        tree.map((node) => (
+                            <Folder
+                                key={node._id}
+                                projectId={projectId}
+                                node={node}
+                                tree={tree}
+                                reloadTree={reloadTree}
+                                openFile={openFile}
+                            />
+                        ))
 
                 )}
             </div>
